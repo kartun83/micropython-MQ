@@ -1,28 +1,38 @@
 #include "BaseMQ.h"
-# Ported from https://github.com/amperka/TroykaMQ
-# Author: Alexey Tveritinov [kartun@yandex.ru]
+## Ported from https://github.com/amperka/TroykaMQ
+## Author: Alexey Tveritinov [kartun@yandex.ru]
 
 from machine import Pin, ADC
 from micropython import const
 import utime
 from math import exp, log
 
-""" Measuring attempts in cycle """
+''' Measuring attempts in cycle '''
 MQ_SAMPLE_TIMES = const(5)
-""" Delay after each measurement, in ms """
+''' Delay after each measurement, in ms '''
 MQ_SAMPLE_INTERVAL = const(5000)
 
-""" Heating period, in ms """
+''' Heating period, in ms '''
 MQ_HEATING_PERIOD = const(60000)
 
-""" Cooling period, in ms """
+''' Cooling period, in ms '''
 MQ_COOLING_PERIOD = const(90000)
 
+''' This strategy measure values immideatly, so it might be inaccurate. Should be
+    suitable for tracking dynamics, raither than actual values '''
+STRATEGY_FAST = const(1)
+
+''' This strategy measure values separatelly. For a single measurement
+    MQ_SAMPLE_TIMES measurements are taken in interval MQ_SAMPLE_INTERVAL.
+    I.e. for multi-data sensors, like MQ2 it would take a while to receive full data '''
+STRATEGY_ACCURATE = const(2)
+
 class BaseMQ(object):
-    """ Initialization. Pass pinHeader = -1 if heater connected to main power supply """
-    """ On troyka modules there is 10K resistor, on other boards could be other values """
-    """ Optionally board could run on 3.3 Volds, base voltage is 5.0 Volts """
-    def __init__(self, pinData, pinHeater=-1, boardResistance = 10, baseVoltage = 5.0):
+
+    ''' Initialization. Pass pinHeader = -1 if heater connected to main power supply.
+        On troyka modules there is 10K resistor, on other boards could be other values
+        Optionally board could run on 3.3 Volds, base voltage is 5.0 Volts '''       
+    def __init__(self, pinData, pinHeater=-1, boardResistance = 10, baseVoltage = 5.0, measuringStrategy = STRATEGY_ACCURATE):    
         self._heater = False
         self._cooler = False
         self._ro = -1
@@ -32,18 +42,21 @@ class BaseMQ(object):
         self._rsCache = None
         self.dataIsReliable = False
         self.pinData = ADC(pinData)
+        self.measuringStrategy = measuringStrategy
         self._boardResistance = boardResistance
         if pinHeater != -1:
             self.useSeparateHeater = True
             self.pinHeater = Pin(pinHeater, Pin.OUTPUT)
             pass
 
-    """ Abstract method, should be implemented in specific sensor driver """
+    ''' Abstract method, should be implemented in specific sensor driver
+        Base RO differs for every sensor family '''
     def getRoInCleanAir(self):
         raise NotImplementedError("Please Implement this method")
 
-    """ For first time sensor calibration do not pass RO"""
-    """ Sensor calibration with known resistance """
+    ''' For first time sensor calibration do not pass RO. It could be saved for
+        later reference, to bypass calibration. 
+        For sensor calibration with known resistance supply value received from pervious runs'''
     def calibrate(self, ro=-1):
         if ro == -1:
             ro = 0
@@ -59,7 +72,7 @@ class BaseMQ(object):
         self._stateCalibrate = True    
         pass
 
-    """ Enable heater """
+    ''' Enable heater. Is not applicable for 3-wire setup '''
     def heaterPwrHigh(self):
         #digitalWrite(_pinHeater, HIGH)
         #_pinHeater(1)
@@ -70,7 +83,7 @@ class BaseMQ(object):
         self._prMillis = utime.ticks_ms()
 
 
-    """ Move heater to energy saving mode """
+    ''' Move heater to energy saving mode. Is not applicable for 3-wire setup '''
     def heaterPwrLow(self):
         #analogWrite(_pinHeater, 75)
         self._heater = True
@@ -78,7 +91,7 @@ class BaseMQ(object):
         self._prMillis = utime.ticks_ms()
 
 
-    """ Turn off heater """
+    ''' Turn off heater. Is not applicable for 3-wire setup '''
     def heaterPwrOff(self):
         if self._useSeparateHeater:
             self._pinHeater.off()
@@ -88,30 +101,32 @@ class BaseMQ(object):
         self._heater = False
 
 
-    """ Measure sensor resistance value. Could be reused for bypassing true calibration """
+    ''' Measure sensor current resistance value. Here actual measurement is performed'''
     def __calculateResistance__(self, rawAdc):
         vrl = rawAdc*(self._baseVoltage / 1023)
         rsAir = (self._baseVoltage - vrl)/vrl*self._boardResistance
         return rsAir
 
 
-    """ Data reading """
-    """ If data is taken frequently, data reading could be unreliable. Check dataIsReliable flag """
+    ''' Data reading '''
+    ''' If data is taken frequently, data reading could be unreliable. Check dataIsReliable flag
+        Also refer to measuring strategy '''
     def __readRs__(self):
-        if ( utime.ticks_diff(utime.ticks_ms(),self._lastMesurement) > MQ_SAMPLE_INTERVAL * MQ_SAMPLE_TIMES) :        
-            rs = 0
-            for i in range(0, MQ_SAMPLE_TIMES + 1): 
-                rs += self.__calculateResistance__(self.pinData.read())
-                utime.sleep_ms(MQ_SAMPLE_INTERVAL)
+        if self.measuringStrategy == STRATEGY_ACCURATE :            
+                rs = 0
+                for i in range(0, MQ_SAMPLE_TIMES + 1): 
+                    rs += self.__calculateResistance__(self.pinData.read())
+                    utime.sleep_ms(MQ_SAMPLE_INTERVAL)
 
-            rs = rs/MQ_SAMPLE_TIMES
-            self._rsCache = rs
-            self.dataIsReliable = True
-            self._lastMesurement = utime.ticks_ms()
+                rs = rs/MQ_SAMPLE_TIMES
+                self._rsCache = rs
+                self.dataIsReliable = True
+                self._lastMesurement = utime.ticks_ms()                            
+                pass
         else:
             rs = self.__calculateResistance__(self.pinData.read())
             self.dataIsReliable = False
-            # rs = self._rsCache
+            pass
         return rs
 
 
@@ -123,13 +138,14 @@ class BaseMQ(object):
         return self.__readRs__()/self._ro
 
 
+    ''' Checks if sensor heating is completed. Is not applicable for 3-wire setup '''
     def heatingCompleted(self):
         if (self._heater) and (not self._cooler) and (utime.ticks_diff(utime.ticks_ms(),self._prMillis) > MQ_HEATING_PERIOD):
             return True
         else:
             return False
 
-
+    ''' Checks if sensor cooling is completed. Is not applicable for 3-wire setup '''
     def coolanceCompleted(self):
         if (self._heater) and (self._cooler) and (utime.ticks_diff(utime.ticks_ms(), self._prMillis) > MQ_COOLING_PERIOD):
             return True
